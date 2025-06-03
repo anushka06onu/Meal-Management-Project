@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>UniMeal</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="./Styles/index.css" />
+  </head>
+
+  <body class="bg-white text-gray-800">
+    <!-- Login/Register Selection -->
+    <div
+      id="auth-section"
+      class="hero-section min-h-screen flex flex-col justify-center items-center space-y-6">
+      <section class="section">
+        <div class="under-div">
+          <p class="para1">Savor the Flavors</p>
+          <h1>Experience Culinary Excellence Food Experience</h1>
+          <p class="para2">
+            Contrary to popular belief, Lorem Ipsum is not simply random text.
+            It has roots in a piece of classical Latin literature from 45 BC,
+            making it over 2000 years old. Richard McClintock
+          </p>
+          <div class="gap-3 text-center">
+            <button
+              onclick="loginClick()"
+              class="btn px-6 py-2 bg-green-400 text-white rounded">
+              Login
+            </button>
+            <button
+              onclick="regClick()"
+              class="btn px-6 py-2 bg-pink-600 text-white rounded">
+              Register
+            </button>
+          </div>
+        </div>
+      </section>
+    </div>
+
+    <script src="./scripts/toggle.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/sweetalert2@11"></script>
+  </body>
+</html>
