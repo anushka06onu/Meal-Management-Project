@@ -1,5 +1,5 @@
 const express = require("express");
-const sqlite3 = require("sqlite3").verbose();
+const mysql = require("mysql2/promise");
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 const cors = require("cors");
@@ -11,101 +11,19 @@ const PORT = 8070;
 const app = express();
 app.use(express.json());
 app.use(cors());
-
-// In Vercel, static files are served from the root automatically.
-// We don't need app.use(express.static('.')) here if we use Vercel's static routing.
-// But keeping it for local development is fine.
 app.use(express.static('.'));
 
-// Database connection
-const dbPath = process.env.VERCEL ? '/tmp/database.sqlite' : 'database.sqlite';
-const db = new sqlite3.Database(dbPath);
-
-// Initialize DB if on Vercel or fresh local
-db.serialize(() => {
-    db.run(`CREATE TABLE IF NOT EXISTS users (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        username TEXT UNIQUE,
-        password TEXT,
-        name TEXT,
-        email TEXT,
-        phone TEXT,
-        role TEXT
-    )`);
-
-    db.run(`CREATE TABLE IF NOT EXISTS customers (
-        user_id INTEGER PRIMARY KEY,
-        balance REAL,
-        FOREIGN KEY(user_id) REFERENCES users(id)
-    )`);
-
-    db.run(`CREATE TABLE IF NOT EXISTS menu_items (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        name TEXT,
-        price REAL,
-        active BOOLEAN,
-        description TEXT,
-        image_path TEXT
-    )`);
-
-    db.run(`CREATE TABLE IF NOT EXISTS orders (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        customer_id INTEGER,
-        total_amount REAL,
-        status TEXT,
-        special_instructions TEXT,
-        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-        FOREIGN KEY(customer_id) REFERENCES users(id)
-    )`);
-
-    db.run(`CREATE TABLE IF NOT EXISTS order_items (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        order_id INTEGER,
-        menu_item_id INTEGER,
-        quantity INTEGER,
-        FOREIGN KEY(order_id) REFERENCES orders(id),
-        FOREIGN KEY(menu_item_id) REFERENCES menu_items(id)
-    )`);
-
-    db.run(`CREATE TABLE IF NOT EXISTS transactions (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        customer_id INTEGER,
-        amount REAL,
-        type TEXT,
-        description TEXT,
-        FOREIGN KEY(customer_id) REFERENCES users(id)
-    )`);
-
-    // Insert dummy data if empty
-    db.get("SELECT COUNT(*) as count FROM menu_items", (err, row) => {
-        if (row && row.count === 0) {
-            db.run(`INSERT INTO menu_items (name, price, active, description, image_path) VALUES 
-                ('Classic Burger', 5.99, 1, 'Juicy beef patty with lettuce and tomato.', './images/classic_burger.png'),
-                ('Veggie Pizza', 8.49, 1, 'Fresh vegetables and mozzarella cheese.', './images/food_banner.png'),
-                ('Grilled Chicken Salad', 6.99, 1, 'Healthy greens with grilled chicken breast.', './images/food_banner.png'),
-                ('Pasta Carbonara', 7.99, 1, 'Creamy pasta with bacon and parmesan.', './images/food_banner.png')
-            `);
-        }
-    });
+// Database connection (Restoring original MySQL credentials)
+const pool = mysql.createPool({
+    host: "uk02-sql.pebblehost.com",
+    port: 3306,
+    user: "customer_684607_meal_management",
+    password: "l98^!iJUcmCQ4u^Q18pnDBs8",
+    database: "customer_684607_meal_management",
+    waitForConnections: true,
+    connectionLimit: 10,
+    queueLimit: 0,
 });
-
-// Wrapper for async/await to mimic mysql2
-const query = (sql, params = []) => {
-    return new Promise((resolve, reject) => {
-        const upperSql = sql.trim().toUpperCase();
-        if (upperSql.startsWith('SELECT') || upperSql.startsWith('WITH')) {
-            db.all(sql, params, (err, rows) => {
-                if (err) reject(err);
-                else resolve([rows]);
-            });
-        } else {
-            db.run(sql, params, function(err) {
-                if (err) reject(err);
-                else resolve([{ insertId: this.lastID, changes: this.changes }]);
-            });
-        }
-    });
-};
 
 // Authentication middleware
 const authenticateToken = (req, res, next) => {
@@ -134,7 +52,7 @@ app.post("/api/auth/register", async (req, res) => {
     try {
         const { username, password, name, email, phone } = req.body;
 
-        const [existingUsers] = await query(
+        const [existingUsers] = await pool.query(
             "SELECT * FROM users WHERE username = ?",
             [username]
         );
@@ -144,12 +62,12 @@ app.post("/api/auth/register", async (req, res) => {
 
         const hashedPassword = await bcrypt.hash(password, 10);
 
-        const [result] = await query(
+        const [result] = await pool.query(
             "INSERT INTO users (username, password, name, email, phone, role) VALUES (?, ?, ?, ?, ?, ?)",
             [username, hashedPassword, name, email, phone, "customer"]
         );
 
-        await query(
+        await pool.query(
             "INSERT INTO customers (user_id, balance) VALUES (?, ?)",
             [result.insertId, 100]
         );
@@ -166,7 +84,7 @@ app.post("/api/auth/login", async (req, res) => {
     try {
         const { username, password } = req.body;
 
-        const [users] = await query(
+        const [users] = await pool.query(
             "SELECT * FROM users WHERE username = ?",
             [username]
         );
@@ -208,11 +126,11 @@ app.get("/api/customers/profile", authenticateToken, async (req, res) => {
             return res.status(403).json({ error: "Access denied" });
         }
 
-        const [users] = await query(
+        const [users] = await pool.query(
             "SELECT id, username, name, email, phone FROM users WHERE id = ?",
             [req.user.id]
         );
-        const [customers] = await query(
+        const [customers] = await pool.query(
             "SELECT balance FROM customers WHERE user_id = ?",
             [req.user.id]
         );
@@ -231,7 +149,7 @@ app.get("/api/customers/profile", authenticateToken, async (req, res) => {
 // Get menu items
 app.get("/api/menu", authenticateToken, async (req, res) => {
     try {
-        const [menuItems] = await query(
+        const [menuItems] = await pool.query(
             "SELECT * FROM menu_items WHERE active = 1"
         );
         res.json(menuItems);
@@ -243,6 +161,7 @@ app.get("/api/menu", authenticateToken, async (req, res) => {
 
 // Place an order
 app.post("/api/orders", authenticateToken, async (req, res) => {
+    const connection = await pool.getConnection();
     try {
         if (req.user.role !== "customer") {
             return res.status(403).json({ error: "Access denied" });
@@ -250,84 +169,82 @@ app.post("/api/orders", authenticateToken, async (req, res) => {
 
         const { items, specialInstructions } = req.body;
 
-        await query("BEGIN TRANSACTION");
+        await connection.beginTransaction();
 
-        try {
-            const [customers] = await query(
-                "SELECT balance FROM customers WHERE user_id = ?",
-                [req.user.id]
-            );
+        const [customers] = await connection.query(
+            "SELECT balance FROM customers WHERE user_id = ?",
+            [req.user.id]
+        );
 
-            if (customers.length === 0) {
-                await query("ROLLBACK");
-                return res.status(404).json({ error: "Customer not found" });
-            }
-
-            let currentBalance = customers[0].balance;
-            let orderTotal = 0;
-
-            for (const item of items) {
-                const [menuItems] = await query(
-                    "SELECT price FROM menu_items WHERE id = ?",
-                    [item.menuItemId]
-                );
-
-                if (menuItems.length === 0) {
-                    await query("ROLLBACK");
-                    return res.status(404).json({
-                        error: `Menu item with id ${item.menuItemId} not found`,
-                    });
-                }
-
-                orderTotal += menuItems[0].price * item.quantity;
-            }
-
-            if (currentBalance < orderTotal) {
-                await query("ROLLBACK");
-                return res.status(400).json({ error: "Insufficient balance" });
-            }
-
-            const [orderResult] = await query(
-                "INSERT INTO orders (customer_id, total_amount, status, special_instructions) VALUES (?, ?, ?, ?)",
-                [req.user.id, orderTotal, "pending", specialInstructions || ""]
-            );
-
-            for (const item of items) {
-                await query(
-                    "INSERT INTO order_items (order_id, menu_item_id, quantity) VALUES (?, ?, ?)",
-                    [orderResult.insertId, item.menuItemId, item.quantity]
-                );
-            }
-
-            await query(
-                "UPDATE customers SET balance = balance - ? WHERE user_id = ?",
-                [orderTotal, req.user.id]
-            );
-
-            await query(
-                "INSERT INTO transactions (customer_id, amount, type, description) VALUES (?, ?, ?, ?)",
-                [
-                    req.user.id,
-                    orderTotal,
-                    "debit",
-                    `Payment for order #${orderResult.insertId}`,
-                ]
-            );
-
-            await query("COMMIT");
-
-            res.status(201).json({
-                message: "Order placed successfully",
-                orderId: orderResult.insertId,
-                totalAmount: orderTotal,
-            });
-        } catch (error) {
-            await query("ROLLBACK");
-            throw error;
+        if (customers.length === 0) {
+            await connection.rollback();
+            return res.status(404).json({ error: "Customer not found" });
         }
+
+        let currentBalance = customers[0].balance;
+        let orderTotal = 0;
+
+        for (const item of items) {
+            const [menuItems] = await connection.query(
+                "SELECT price FROM menu_items WHERE id = ?",
+                [item.menuItemId]
+            );
+
+            if (menuItems.length === 0) {
+                await connection.rollback();
+                return res.status(404).json({
+                    error: `Menu item with id ${item.menuItemId} not found`,
+                });
+            }
+
+            orderTotal += menuItems[0].price * item.quantity;
+        }
+
+        if (currentBalance < orderTotal) {
+            await connection.rollback();
+            return res.status(400).json({ error: "Insufficient balance" });
+        }
+
+        const [orderResult] = await connection.query(
+            "INSERT INTO orders (customer_id, total_amount, status, special_instructions) VALUES (?, ?, ?, ?)",
+            [req.user.id, orderTotal, "pending", specialInstructions || ""]
+        );
+
+        for (const item of items) {
+            await connection.query(
+                "INSERT INTO order_items (order_id, menu_item_id, quantity) VALUES (?, ?, ?)",
+                [orderResult.insertId, item.menuItemId, item.quantity]
+            );
+        }
+
+        await connection.query(
+            "UPDATE customers SET balance = balance - ? WHERE user_id = ?",
+            [orderTotal, req.user.id]
+        );
+
+        await connection.query(
+            "INSERT INTO transactions (customer_id, amount, type, description) VALUES (?, ?, ?, ?)",
+            [
+                req.user.id,
+                orderTotal,
+                "debit",
+                `Payment for order #${orderResult.insertId}`,
+            ]
+        );
+
+        await connection.commit();
+
+        res.status(201).json({
+            message: "Order placed successfully",
+            orderId: orderResult.insertId,
+            totalAmount: orderTotal,
+        });
     } catch (error) {
+        await connection.rollback();
         console.error(error);
         res.status(500).json({ error: "Server error" });
+    } finally {
+        connection.release();
     }
 });
 
@@ -338,11 +255,12 @@ app.get("/api/customers/orders", authenticateToken, async (req, res) => {
             return res.status(403).json({ error: "Access denied" });
         }
 
-        const [orders] = await query(
+        // Original MySQL query
+        const [orders] = await pool.query(
             `
       SELECT o.*, 
-      (SELECT json_group_array(
-        json_object(
+      (SELECT JSON_ARRAYAGG(
+        JSON_OBJECT(
           'id', oi.id,
           'menuItemId', oi.menu_item_id,
           'name', mi.name,
@@ -359,8 +277,10 @@ app.get("/api/customers/orders", authenticateToken, async (req, res) => {
             [req.user.id]
         );
 
+        // MySQL returns items as a JSON string or array depending on driver configuration.
+        // Usually it's a string for JSON_ARRAYAGG if not parsed.
         orders.forEach(order => {
-            if (order.items) {
+            if (typeof order.items === 'string') {
                 order.items = JSON.parse(order.items);
             }
         });
@@ -372,12 +292,11 @@ app.get("/api/customers/orders", authenticateToken, async (req, res) => {
     }
 });
 
-// Only listen locally, Vercel will handle the app export
+// Only listen locally
 if (!process.env.VERCEL) {
     app.listen(PORT, () => {
         console.log(`Server running on port ${PORT}`);
     });
 }
 
-// Export the app for Vercel
 module.exports = app;
