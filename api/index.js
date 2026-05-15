@@ -11,7 +11,14 @@ const PORT = 8070;
 const app = express();
 app.use(express.json());
 app.use(cors());
-app.use(express.static('.'));
+
+// Serve static files from root
+app.get('/', (req, res) => {
+    res.sendFile(path.join(__dirname, '../index.html'));
+});
+app.use('/Styles', express.static(path.join(__dirname, '../Styles')));
+app.use('/scripts', express.static(path.join(__dirname, '../scripts')));
+app.use('/images', express.static(path.join(__dirname, '../images')));
 
 // Database connection (Restoring original MySQL credentials)
 const pool = mysql.createPool({
