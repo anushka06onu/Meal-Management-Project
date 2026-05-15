@@ -3,16 +3,91 @@ const sqlite3 = require("sqlite3").verbose();
 const bcrypt = require("bcrypt");
 const jwt = require("jsonwebtoken");
 const cors = require("cors");
+const fs = require("fs");
+const path = require("path");
 
 const PORT = 8070;
 
 const app = express();
 app.use(express.json());
 app.use(cors());
+
+// In Vercel, static files are served from the root automatically.
+// We don't need app.use(express.static('.')) here if we use Vercel's static routing.
+// But keeping it for local development is fine.
 app.use(express.static('.'));
 
 // Database connection
-const db = new sqlite3.Database('database.sqlite');
+const dbPath = process.env.VERCEL ? '/tmp/database.sqlite' : 'database.sqlite';
+const db = new sqlite3.Database(dbPath);
+
+// Initialize DB if on Vercel or fresh local
+db.serialize(() => {
+    db.run(`CREATE TABLE IF NOT EXISTS users (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        username TEXT UNIQUE,
+        password TEXT,
+        name TEXT,
+        email TEXT,
+        phone TEXT,
+        role TEXT
+    )`);
+
+    db.run(`CREATE TABLE IF NOT EXISTS customers (
+        user_id INTEGER PRIMARY KEY,
+        balance REAL,
+        FOREIGN KEY(user_id) REFERENCES users(id)
+    )`);
+
+    db.run(`CREATE TABLE IF NOT EXISTS menu_items (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT,
+        price REAL,
+        active BOOLEAN,
+        description TEXT,
+        image_path TEXT
+    )`);
+
+    db.run(`CREATE TABLE IF NOT EXISTS orders (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        customer_id INTEGER,
+        total_amount REAL,
+        status TEXT,
+        special_instructions TEXT,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY(customer_id) REFERENCES users(id)
+    )`);
+
+    db.run(`CREATE TABLE IF NOT EXISTS order_items (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        order_id INTEGER,
+        menu_item_id INTEGER,
+        quantity INTEGER,
+        FOREIGN KEY(order_id) REFERENCES orders(id),
+        FOREIGN KEY(menu_item_id) REFERENCES menu_items(id)
+    )`);
+
+    db.run(`CREATE TABLE IF NOT EXISTS transactions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        customer_id INTEGER,
+        amount REAL,
+        type TEXT,
+        description TEXT,
+        FOREIGN KEY(customer_id) REFERENCES users(id)
+    )`);
+
+    // Insert dummy data if empty
+    db.get("SELECT COUNT(*) as count FROM menu_items", (err, row) => {
+        if (row && row.count === 0) {
+            db.run(`INSERT INTO menu_items (name, price, active, description, image_path) VALUES 
+                ('Classic Burger', 5.99, 1, 'Juicy beef patty with lettuce and tomato.', './images/classic_burger.png'),
+                ('Veggie Pizza', 8.49, 1, 'Fresh vegetables and mozzarella cheese.', './images/food_banner.png'),
+                ('Grilled Chicken Salad', 6.99, 1, 'Healthy greens with grilled chicken breast.', './images/food_banner.png'),
+                ('Pasta Carbonara', 7.99, 1, 'Creamy pasta with bacon and parmesan.', './images/food_banner.png')
+            `);
+        }
+    });
+});
 
 // Wrapper for async/await to mimic mysql2
 const query = (sql, params = []) => {
@@ -59,7 +134,6 @@ app.post("/api/auth/register", async (req, res) => {
     try {
         const { username, password, name, email, phone } = req.body;
 
-        // Check if user already exists
         const [existingUsers] = await query(
             "SELECT * FROM users WHERE username = ?",
             [username]
@@ -68,19 +142,16 @@ app.post("/api/auth/register", async (req, res) => {
             return res.status(400).json({ error: "Username already exists" });
         }
 
-        // Hash password
         const hashedPassword = await bcrypt.hash(password, 10);
 
-        // Create user with customer role
         const [result] = await query(
             "INSERT INTO users (username, password, name, email, phone, role) VALUES (?, ?, ?, ?, ?, ?)",
             [username, hashedPassword, name, email, phone, "customer"]
         );
 
-        // Create customer entry with initial balance
         await query(
             "INSERT INTO customers (user_id, balance) VALUES (?, ?)",
-            [result.insertId, 100] // Giving initial balance of 100 for testing
+            [result.insertId, 100]
         );
 
         res.status(201).json({ message: "Customer registered successfully" });
@@ -95,7 +166,6 @@ app.post("/api/auth/login", async (req, res) => {
     try {
         const { username, password } = req.body;
 
-        // Find user
         const [users] = await query(
             "SELECT * FROM users WHERE username = ?",
             [username]
@@ -106,13 +176,11 @@ app.post("/api/auth/login", async (req, res) => {
 
         const user = users[0];
 
-        // Check password
         const validPassword = await bcrypt.compare(password, user.password);
         if (!validPassword) {
             return res.status(401).json({ error: "Invalid credentials" });
         }
 
-        // Generate JWT
         const token = jwt.sign(
             { id: user.id, username: user.username, role: user.role },
             "jwt_secret",
@@ -182,11 +250,9 @@ app.post("/api/orders", authenticateToken, async (req, res) => {
 
         const { items, specialInstructions } = req.body;
 
-        // Start transaction
         await query("BEGIN TRANSACTION");
 
         try {
-            // Get customer balance
             const [customers] = await query(
                 "SELECT balance FROM customers WHERE user_id = ?",
                 [req.user.id]
@@ -198,9 +264,8 @@ app.post("/api/orders", authenticateToken, async (req, res) => {
             }
 
             let currentBalance = customers[0].balance;
-
-            // Calculate order total
             let orderTotal = 0;
+
             for (const item of items) {
                 const [menuItems] = await query(
                     "SELECT price FROM menu_items WHERE id = ?",
@@ -217,19 +282,16 @@ app.post("/api/orders", authenticateToken, async (req, res) => {
                 orderTotal += menuItems[0].price * item.quantity;
             }
 
-            // Check if balance is sufficient
             if (currentBalance < orderTotal) {
                 await query("ROLLBACK");
                 return res.status(400).json({ error: "Insufficient balance" });
             }
 
-            // Create order
             const [orderResult] = await query(
                 "INSERT INTO orders (customer_id, total_amount, status, special_instructions) VALUES (?, ?, ?, ?)",
                 [req.user.id, orderTotal, "pending", specialInstructions || ""]
             );
 
-            // Add order items
             for (const item of items) {
                 await query(
                     "INSERT INTO order_items (order_id, menu_item_id, quantity) VALUES (?, ?, ?)",
@@ -237,13 +299,11 @@ app.post("/api/orders", authenticateToken, async (req, res) => {
                 );
             }
 
-            // Update customer balance
             await query(
                 "UPDATE customers SET balance = balance - ? WHERE user_id = ?",
                 [orderTotal, req.user.id]
             );
 
-            // Create transaction record
             await query(
                 "INSERT INTO transactions (customer_id, amount, type, description) VALUES (?, ?, ?, ?)",
                 [
@@ -254,7 +314,6 @@ app.post("/api/orders", authenticateToken, async (req, res) => {
                 ]
             );
 
-            // Commit transaction
             await query("COMMIT");
 
             res.status(201).json({
@@ -279,7 +338,6 @@ app.get("/api/customers/orders", authenticateToken, async (req, res) => {
             return res.status(403).json({ error: "Access denied" });
         }
 
-        // SQLite version of the JSON query
         const [orders] = await query(
             `
       SELECT o.*, 
@@ -301,7 +359,6 @@ app.get("/api/customers/orders", authenticateToken, async (req, res) => {
             [req.user.id]
         );
 
-        // Parse items JSON string for each order (SQLite returns it as string)
         orders.forEach(order => {
             if (order.items) {
                 order.items = JSON.parse(order.items);
@@ -315,26 +372,12 @@ app.get("/api/customers/orders", authenticateToken, async (req, res) => {
     }
 });
 
-// Contact Us
-app.post("/api/contact", async (req, res) => {
-    try {
-        const { user_id, name, email, message } = req.body;
+// Only listen locally, Vercel will handle the app export
+if (!process.env.VERCEL) {
+    app.listen(PORT, () => {
+        console.log(`Server running on port ${PORT}`);
+    });
+}
 
-        await query(
-            "INSERT INTO contact_us (user_id, name, email, message) VALUES (?, ?, ?, ?)",
-            [user_id, name, email, message]
-        );
-
-        res.status(201).json({
-            message: "Contact message submitted successfully!",
-        });
-    } catch (error) {
-        console.error(error);
-        res.status(500).json({ error: "Server error" });
-    }
-});
-
-// Start the server
-app.listen(PORT, () => {
-    console.log(`Server running on port ${PORT}`);
-});
+// Export the app for Vercel
+module.exports = app;

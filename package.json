@@ -2,10 +2,10 @@
     "name": "meal-management-system",
     "version": "1.0.0",
     "description": "Backend for a meal management system DBMS lab project",
-    "main": "server.js",
+    "main": "api/index.js",
     "scripts": {
-        "start": "node server.js",
-        "dev": "nodemon server.js",
+        "start": "node api/index.js",
+        "dev": "nodemon api/index.js",
         "setup-db": "node setup-db.js"
     },
     "dependencies": {
