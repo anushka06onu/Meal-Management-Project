@@ -1,3 +1,6 @@
+require("dotenv").config();
+const {databaseConfig,signingSecret,validateItems} = require("./security.cjs");
+const {placeOrder} = require("./order.cjs");
 const express = require("express");
 const mysql = require("mysql2/promise");
 const bcrypt = require("bcryptjs");
@@ -6,7 +9,7 @@ const cors = require("cors");
 const fs = require("fs");
 const path = require("path");
 
-const PORT = 8070;
+const PORT = Number(process.env.PORT || 8070);
 
 const app = express();
 app.use(express.json());
@@ -20,16 +23,14 @@ app.use('/Styles', express.static(path.join(__dirname, '../Styles')));
 app.use('/scripts', express.static(path.join(__dirname, '../scripts')));
 app.use('/images', express.static(path.join(__dirname, '../images')));
 
-// Database connection (Restoring original MySQL credentials)
-const pool = mysql.createPool({
-    host: "uk02-sql.pebblehost.com",
-    port: 3306,
-    user: "customer_684607_meal_management",
-    password: "l98^!iJUcmCQ4u^Q18pnDBs8",
-    database: "customer_684607_meal_management",
-    waitForConnections: true,
-    connectionLimit: 10,
-    queueLimit: 0,
+let pool;
+let jwtSecret;
+try { pool = mysql.createPool(databaseConfig()); jwtSecret = signingSecret(); }
+catch { console.error('UniMeal API configuration is incomplete; set database and JWT environment variables.'); }
+app.get('/api/health', (_req,res) => res.status(pool && jwtSecret ? 200 : 503).json({ready:Boolean(pool && jwtSecret)}));
+app.use('/api', (_req,res,next) => {
+    if (!pool || !jwtSecret) return res.status(503).json({error:'The meal service is not configured. Please try again later.'});
+    next();
 });
 
 // Authentication middleware
@@ -41,7 +42,7 @@ const authenticateToken = (req, res, next) => {
         return res.status(401).json({ error: "Access denied" });
     }
 
-    jwt.verify(token, "jwt_secret", (err, user) => {
+    jwt.verify(token, jwtSecret, (err, user) => {
         if (err) {
             return res.status(403).json({ error: "Invalid or expired token" });
         }
@@ -55,41 +56,29 @@ const authenticateToken = (req, res, next) => {
 // -------------------------
 
 // Customer Registration
-app.post("/api/auth/register", async (req, res) => {
+app.post("/api/auth/register", async (req,res) => {
+    const {username,password,name,email,phone=''}=req.body;
+    if(typeof username!=='string'||username.trim().length<3||username.length>80||typeof password!=='string'||password.length<8||password.length>72||typeof name!=='string'||!name.trim()||name.length>120||typeof email!=='string'||!/^\S+@\S+\.\S+$/.test(email)||email.length>254||typeof phone!=='string'||phone.length>40)return res.status(400).json({error:'Provide valid registration details and an 8–72 character password.'});
+    let connection;
     try {
-        const { username, password, name, email, phone } = req.body;
-
-        const [existingUsers] = await pool.query(
-            "SELECT * FROM users WHERE username = ?",
-            [username]
-        );
-        if (existingUsers.length > 0) {
-            return res.status(400).json({ error: "Username already exists" });
-        }
-
-        const hashedPassword = await bcrypt.hash(password, 10);
-
-        const [result] = await pool.query(
-            "INSERT INTO users (username, password, name, email, phone, role) VALUES (?, ?, ?, ?, ?, ?)",
-            [username, hashedPassword, name, email, phone, "customer"]
-        );
-
-        await pool.query(
-            "INSERT INTO customers (user_id, balance) VALUES (?, ?)",
-            [result.insertId, 100]
-        );
-
-        res.status(201).json({ message: "Customer registered successfully" });
-    } catch (error) {
-        console.error(error);
-        res.status(500).json({ error: "Server error" });
-    }
+        connection=await pool.getConnection();
+        await connection.beginTransaction();
+        const hashedPassword=await bcrypt.hash(password,12);
+        const [user]=await connection.query('INSERT INTO users (username,password,name,email,phone,role) VALUES (?, ?, ?, ?, ?, ?)',[username.trim(),hashedPassword,name.trim(),email.trim().toLowerCase(),phone,'customer']);
+        await connection.query('INSERT INTO customers (user_id,balance) VALUES (?, ?)',[user.insertId,0]);
+        await connection.commit();
+        return res.status(201).json({message:'Customer registered successfully'});
+    }catch(error){
+        if(connection)await connection.rollback();
+        return res.status(error.code==='ER_DUP_ENTRY'?409:500).json({error:error.code==='ER_DUP_ENTRY'?'Username or email already exists':'Registration could not be completed'});
+    }finally{if(connection)connection.release();}
 });
 
 // Login
 app.post("/api/auth/login", async (req, res) => {
     try {
         const { username, password } = req.body;
+        if(typeof username!=="string"||typeof password!=="string"||!username||!password)return res.status(400).json({error:"Username and password are required"});
 
         const [users] = await pool.query(
             "SELECT * FROM users WHERE username = ?",
@@ -108,7 +97,7 @@ app.post("/api/auth/login", async (req, res) => {
 
         const token = jwt.sign(
             { id: user.id, username: user.username, role: user.role },
-            "jwt_secret",
+            jwtSecret,
             { expiresIn: "24h" }
         );
 
@@ -167,92 +156,18 @@ app.get("/api/menu", authenticateToken, async (req, res) => {
 });
 
 // Place an order
-app.post("/api/orders", authenticateToken, async (req, res) => {
-    const connection = await pool.getConnection();
+app.post("/api/orders", authenticateToken, async (req,res) => {
+    if(req.user.role !== 'customer')return res.status(403).json({error:'Access denied'});
+    let connection;
     try {
-        if (req.user.role !== "customer") {
-            return res.status(403).json({ error: "Access denied" });
-        }
-
-        const { items, specialInstructions } = req.body;
-
-        await connection.beginTransaction();
-
-        const [customers] = await connection.query(
-            "SELECT balance FROM customers WHERE user_id = ?",
-            [req.user.id]
-        );
-
-        if (customers.length === 0) {
-            await connection.rollback();
-            return res.status(404).json({ error: "Customer not found" });
-        }
-
-        let currentBalance = customers[0].balance;
-        let orderTotal = 0;
-
-        for (const item of items) {
-            const [menuItems] = await connection.query(
-                "SELECT price FROM menu_items WHERE id = ?",
-                [item.menuItemId]
-            );
-
-            if (menuItems.length === 0) {
-                await connection.rollback();
-                return res.status(404).json({
-                    error: `Menu item with id ${item.menuItemId} not found`,
-                });
-            }
-
-            orderTotal += menuItems[0].price * item.quantity;
-        }
-
-        if (currentBalance < orderTotal) {
-            await connection.rollback();
-            return res.status(400).json({ error: "Insufficient balance" });
-        }
-
-        const [orderResult] = await connection.query(
-            "INSERT INTO orders (customer_id, total_amount, status, special_instructions) VALUES (?, ?, ?, ?)",
-            [req.user.id, orderTotal, "pending", specialInstructions || ""]
-        );
-
-        for (const item of items) {
-            await connection.query(
-                "INSERT INTO order_items (order_id, menu_item_id, quantity) VALUES (?, ?, ?)",
-                [orderResult.insertId, item.menuItemId, item.quantity]
-            );
-        }
-
-        await connection.query(
-            "UPDATE customers SET balance = balance - ? WHERE user_id = ?",
-            [orderTotal, req.user.id]
-        );
-
-        await connection.query(
-            "INSERT INTO transactions (customer_id, amount, type, description) VALUES (?, ?, ?, ?)",
-            [
-                req.user.id,
-                orderTotal,
-                "debit",
-                `Payment for order #${orderResult.insertId}`,
-            ]
-        );
-
-        await connection.commit();
-
-        res.status(201).json({
-            message: "Order placed successfully",
-            orderId: orderResult.insertId,
-            totalAmount: orderTotal,
-        });
-    } catch (error) {
-        await connection.rollback();
-        console.error(error);
-        res.status(500).json({ error: "Server error" });
-    } finally {
-        connection.release();
-    }
+        const {items,specialInstructions=''}=req.body;
+        validateItems(items,specialInstructions);
+        connection=await pool.getConnection();
+        const result=await placeOrder(connection,req.user.id,items,specialInstructions);
+        return res.status(201).json({message:'Order placed successfully',...result});
+    } catch(error) {
+        return res.status(error.status || 500).json({error:error.status ? error.message : 'The order could not be completed.'});
+    } finally { if(connection)connection.release(); }
 });
 
 // Get customer's order history
@@ -307,3 +222,4 @@ if (!process.env.VERCEL) {
 }
 
 module.exports = app;
+
