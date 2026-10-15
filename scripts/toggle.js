@@ -1,8 +1,10 @@
+const escapeHtml = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const API_BASE_URL = '';
 
 // State
 let token = localStorage.getItem('token') || null;
-let user = JSON.parse(localStorage.getItem('user')) || null;
+let user = null;
+try { user = JSON.parse(localStorage.getItem('user')); } catch { localStorage.removeItem('user'); }
 let cart = [];
 
 // Initialize
@@ -222,7 +224,7 @@ async function fetchProfile() {
         const data = await response.json();
         if (response.ok) {
             const balanceEl = document.getElementById('customer-balance');
-            if (balanceEl) balanceEl.textContent = `$${data.balance.toFixed(2)}`;
+            if (balanceEl) balanceEl.textContent = `$${Number(data.balance).toFixed(2)}`;
         }
     } catch (error) {
         console.error('Error fetching profile:', error);
@@ -256,17 +258,18 @@ function renderMenu(items) {
         
         card.innerHTML = `
             <div>
-                <img src="${imgSrc}" alt="${item.name}" class="w-full h-40 object-cover rounded-xl mb-4" />
-                <h3 class="text-xl font-bold text-gray-900 dark:text-white">${item.name}</h3>
-                <p class="text-gray-600 dark:text-gray-400 mt-2 text-sm">${item.description || 'Delicious meal option.'}</p>
+                <img src="${escapeHtml(imgSrc)}" alt="${escapeHtml(item.name)}" class="w-full h-40 object-cover rounded-xl mb-4" />
+                <h3 class="text-xl font-bold text-gray-900 dark:text-white">${escapeHtml(item.name)}</h3>
+                <p class="text-gray-600 dark:text-gray-400 mt-2 text-sm">${escapeHtml(item.description || 'Delicious meal option.')}</p>
             </div>
             <div class="mt-4 flex justify-between items-center">
-                <span class="text-lg font-bold text-green-500">$${item.price.toFixed(2)}</span>
-                <button onclick="addToCart(${item.id}, '${item.name}', ${item.price})" class="px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 transition-colors text-sm">
+                <span class="text-lg font-bold text-green-500">$${Number(item.price).toFixed(2)}</span>
+                <button data-add-cart class="px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 transition-colors text-sm">
                     Add to Cart
                 </button>
             </div>
         `;
+        card.querySelector('[data-add-cart]').addEventListener('click', () => addToCart(item.id, item.name, Number(item.price)));
         menuContainer.appendChild(card);
     });
 }
@@ -301,7 +304,7 @@ function updateCartUI() {
         div.className = 'flex justify-between items-center py-2 border-b border-gray-200 dark:border-gray-700';
         div.innerHTML = `
             <div>
-                <span class="font-medium dark:text-white">${item.name}</span>
+                <span class="font-medium dark:text-white">${escapeHtml(item.name)}</span>
                 <span class="text-sm text-gray-500 dark:text-gray-400">x${item.quantity}</span>
             </div>
             <span class="font-bold dark:text-white">$${(item.price * item.quantity).toFixed(2)}</span>
@@ -382,10 +385,10 @@ function renderOrders(orders) {
         tr.innerHTML = `
             <td class="px-4 py-3 font-medium text-gray-900 dark:text-white">#${order.id}</td>
             <td class="px-4 py-3 dark:text-gray-300">${new Date(order.created_at).toLocaleDateString()}</td>
-            <td class="px-4 py-3 font-bold text-gray-900 dark:text-white">$${order.total_amount.toFixed(2)}</td>
+            <td class="px-4 py-3 font-bold text-gray-900 dark:text-white">$${Number(order.total_amount).toFixed(2)}</td>
             <td class="px-4 py-3">
                 <span class="px-2 py-1 text-xs font-semibold rounded-full ${getStatusClass(order.status)}">
-                    ${order.status}
+                    ${escapeHtml(order.status)}
                 </span>
             </td>
         `;
@@ -401,3 +404,4 @@ function getStatusClass(status) {
         default: return 'bg-gray-100 text-gray-800';
     }
 }
+
